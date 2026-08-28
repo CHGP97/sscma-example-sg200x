@@ -5,11 +5,13 @@
 
 #include "stream.h"
 
+#include "onvif/onvif_service.h"
+
 namespace ma::node {
 
 static constexpr char TAG[] = "ma::node::stream";
 
-StreamNode::StreamNode(std::string id) : Node("stream", id), port_(0), host_(""), url_(""), username_(""), password_(""), thread_(nullptr), camera_(nullptr), frame_(60), transport_(nullptr) {
+StreamNode::StreamNode(std::string id) : Node("stream", id), port_(0), host_(""), url_(""), username_(""), password_(""), onvif_(false), onvifPort_(8899), thread_(nullptr), camera_(nullptr), frame_(60), transport_(nullptr) {
     char hostname[1024];
     hostname[1023] = '\0';
     gethostname(hostname, 1023);
@@ -29,6 +31,10 @@ void StreamNode::threadEntry() {
 
     while (started_) {
         if (frame_.fetch(reinterpret_cast<void**>(&frame), Tick::fromSeconds(2))) {
+            if (onvif_ && frame->chn == CHN_H264) {
+                video = static_cast<videoFrame*>(frame);
+                onvif::Service::instance().updateGeometry(session_, video->img.width, video->img.height, video->fps);
+            }
             Thread::enterCritical();
             if (enabled_) {
                 if (frame->chn == CHN_H264) {
@@ -75,6 +81,16 @@ ma_err_t StreamNode::onCreate(const json& config) {
     } else {
         password_ = config["password"].get<std::string>();
     }
+    if (!config.contains("onvif")) {
+        onvif_ = false;
+    } else {
+        onvif_ = config["onvif"].get<bool>();
+    }
+    if (!config.contains("onvif_port")) {
+        onvifPort_ = 8899;
+    } else {
+        onvifPort_ = config["onvif_port"].get<int>();
+    }
 
     if (session_.empty()) {
         MA_THROW(Exception(MA_EINVAL, "Session is empty"));
@@ -103,7 +119,25 @@ ma_err_t StreamNode::onCreate(const json& config) {
     if (err != MA_OK) {
         MA_THROW(Exception(err, "RTSP transport init failed"));
     }
-    server_->response(id_, json::object({{"type", MA_MSG_TYPE_RESP}, {"name", "create"}, {"code", err}, {"data", {"url", url_}}}));
+
+    if (onvif_) {
+        onvif::Profile profile;
+        profile.token    = session_;
+        profile.rtspPath = "/" + session_;
+        profile.rtspPort = port_;
+        profile.username = username_;
+        profile.password = password_;
+        err = onvif::Service::instance().registerProfile(profile, onvifPort_);
+        if (err != MA_OK) {
+            MA_LOGW(TAG, "ONVIF registration failed: %d", err);
+        }
+    }
+
+    json data = {{"url", url_}};
+    if (onvif_) {
+        data["onvif"] = onvif::Service::instance().deviceServiceUrl();
+    }
+    server_->response(id_, json::object({{"type", MA_MSG_TYPE_RESP}, {"name", "create"}, {"code", MA_OK}, {"data", data}}));
     created_ = true;
     return err;
 }
@@ -135,6 +169,10 @@ ma_err_t StreamNode::onDestroy() {
     if (thread_ != nullptr) {
         delete thread_;
         thread_ = nullptr;
+    }
+
+    if (onvif_) {
+        onvif::Service::instance().unregisterProfile(session_);
     }
 
     if (transport_ != nullptr) {

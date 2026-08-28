@@ -30,6 +30,8 @@ protected:
     std::string url_;
     std::string username_;
     std::string password_;
+    bool onvif_;
+    int onvifPort_;
     TransportRTSP* transport_;
     CameraNode* camera_;
     MessageBox frame_;
