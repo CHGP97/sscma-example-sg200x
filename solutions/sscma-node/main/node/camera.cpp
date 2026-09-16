@@ -1,6 +1,9 @@
 
 #include <alsa/asoundlib.h>
 
+#include <algorithm>
+#include <cstdint>
+
 #include "camera.h"
 
 namespace ma::node {
@@ -44,6 +47,12 @@ CameraNode::CameraNode(std::string id)
       flip_(false),
       option_(0),
       fps_(30),
+      max_w_(0),
+      max_h_(0),
+      max_fps_(0),
+      max_res_active_(false),
+      capture_w_(1920),
+      capture_h_(1080),
       frame_(60),
       thread_(nullptr),
       thread_audio_(nullptr),
@@ -380,11 +389,6 @@ void CameraNode::threadAudioEntryStub(void* obj) {
 ma_err_t CameraNode::onCreate(const json& config) {
     Guard guard(mutex_);
 
-
-    if (initVideo() != 0) {
-        MA_THROW(Exception(MA_EIO, "Not found camera device"));
-    }
-
     option_ = 0;
 
     if (config.contains("option") && config["option"].is_string()) {
@@ -395,11 +399,34 @@ ma_err_t CameraNode::onCreate(const json& config) {
             option_ = 1;
         } else if (option.find("360p") != std::string::npos) {
             option_ = 2;
+        } else if (option.find("max") != std::string::npos) {
+            option_ = 3;
         }
     }
 
     if (config.contains("option") && config["option"].is_number()) {
         option_ = config["option"].get<int>();
+    }
+
+    // Resolution mode: option 3 = sensor max resolution, others = 1080p default.
+    // VI is initialized once at boot, so a mode change must persist the choice
+    // and restart this service for the new pipeline to come up.
+    int wantRes  = (option_ == 3) ? APP_RES_MODE_MAX : APP_RES_MODE_DEFAULT;
+    int savedRes = APP_RES_MODE_DEFAULT;
+    MA_STORAGE_GET_POD(server_->getStorage(), "camera#res", savedRes, (int)APP_RES_MODE_DEFAULT);
+    if (wantRes != savedRes) {
+        int64_t resVal = wantRes;
+        int ret        = 0;
+        MA_STORAGE_SET_POD(ret, server_->getStorage(), "camera#res", resVal);
+        // detached restart with a grace period for the MQTT error response
+        // (thrown below, replied by the server dispatch catch handler)
+        system("(sleep 2 && /etc/init.d/S91sscma-node restart >/dev/null 2>&1) &");
+        MA_THROW(Exception(MA_EBUSY, "resolution mode changed, restarting sscma-node"));
+    }
+    app_ipcam_Param_SetResMode((APP_RES_MODE_E)savedRes);
+
+    if (initVideo() != 0) {
+        MA_THROW(Exception(MA_EIO, "Not found camera device"));
     }
 
     if (config.contains("preview") && config["preview"].is_boolean()) {
@@ -449,6 +476,12 @@ ma_err_t CameraNode::onCreate(const json& config) {
     setVideoMirror(mirror_);
     setVideoFlip(flip_);
 
+    // sensor max capability (queried after initVideo so the probe has run)
+    max_res_active_ = false;
+    if (getVideoSnsMaxRes((uint32_t*)&max_w_, (uint32_t*)&max_h_, (uint8_t*)&max_fps_) == 0) {
+        max_res_active_ = (max_w_ > 1920 || max_h_ > 1080);
+    }
+
     switch (option_) {
         case 1:
             channels_[CHN_H264].format = MA_PIXEL_FORMAT_H264;
@@ -470,6 +503,31 @@ ma_err_t CameraNode::onCreate(const json& config) {
             channels_[CHN_JPEG].height = 480;
             channels_[CHN_JPEG].fps    = 30;
             break;
+        case 3:
+            // sensor max resolution (e.g. OV5647 2592x1944@15); falls back to
+            // the 1080p defaults when the attached sensor maxes out at 1080p.
+            // CHN_H264 sits on VPSS chn1 (sc_v1, 2880-wide limit) — the only
+            // channel able to carry full 5MP; CHN_JPEG sits on chn2 (sc_v2,
+            // 1920 limit) so it gets an aspect-preserving <=1920 downscale.
+            channels_[CHN_H264].format = MA_PIXEL_FORMAT_H264;
+            if (max_res_active_) {
+                channels_[CHN_H264].width  = max_w_;   // full 2592x1944
+                channels_[CHN_H264].height = max_h_;
+            } else {
+                channels_[CHN_H264].width  = 1920;
+                channels_[CHN_H264].height = 1080;
+            }
+            channels_[CHN_H264].fps = max_res_active_ ? max_fps_ : 30;
+            channels_[CHN_JPEG].format = MA_PIXEL_FORMAT_JPEG;
+            if (max_res_active_ && max_w_ > 1920) {
+                channels_[CHN_JPEG].width  = 1920;
+                channels_[CHN_JPEG].height = (int)((int64_t)max_h_ * 1920 / max_w_ / 2) * 2;
+            } else {
+                channels_[CHN_JPEG].width  = max_res_active_ ? max_w_ : 1920;
+                channels_[CHN_JPEG].height = max_res_active_ ? max_h_ : 1080;
+            }
+            channels_[CHN_JPEG].fps = max_res_active_ ? max_fps_ : 30;
+            break;
         default:
             channels_[CHN_H264].format = MA_PIXEL_FORMAT_H264;
             channels_[CHN_H264].width  = 1920;
@@ -482,7 +540,16 @@ ma_err_t CameraNode::onCreate(const json& config) {
             break;
     }
 
+    // still-capture / preview default size = this node's resolution option
+    // (recorded before the model preview reconfigures the JPEG channel)
+    capture_w_ = channels_[CHN_JPEG].width;
+    capture_h_ = channels_[CHN_JPEG].height;
+
     if (fps_ > 0) {
+        // in max mode the sensor caps below 30fps (e.g. ~15 at 5MP)
+        if (max_res_active_ && fps_ > max_fps_) {
+            fps_ = max_fps_;
+        }
         channels_[CHN_RAW].fps  = fps_;
         channels_[CHN_H264].fps = fps_;
         channels_[CHN_JPEG].fps = fps_;
@@ -631,7 +698,7 @@ ma_err_t CameraNode::onStart() {
         if (i == CHN_AUDIO) {
             continue;
         }
-        video_ch_param_t param;
+        video_ch_param_t param = {};
         switch (channels_[i].format) {
             case MA_PIXEL_FORMAT_JPEG:
                 param.format = VIDEO_FORMAT_JPEG;
@@ -654,7 +721,14 @@ ma_err_t CameraNode::onStart() {
         param.width  = channels_[i].width;
         param.height = channels_[i].height;
         param.fps    = channels_[i].fps;
-        MA_LOGI(TAG, "start channel %d format %d width %d height %d fps %d", i, param.format, param.width, param.height, param.fps);
+        // 5MP pools are ~7.7MB/frame; trim block counts to fit the ION budget
+        // (the H.264 encoder also needs ~3MB/frame recon buffers from ION —
+        // with 3 blocks per 5MP pool the recon allocation fails and stalls
+        // the whole VPSS pipeline)
+        if (max_res_active_ && param.width > 1920) {
+            param.blkcnt = 2;
+        }
+        MA_LOGI(TAG, "start channel %d format %d width %d height %d fps %d blkcnt %d", i, param.format, param.width, param.height, param.fps, param.blkcnt);
         if (channels_[i].enabled) {
             setupVideo(static_cast<video_ch_index_t>(i), &param);
             if (i == CHN_RAW) {

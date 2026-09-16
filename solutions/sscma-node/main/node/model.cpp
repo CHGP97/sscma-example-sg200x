@@ -28,7 +28,7 @@ ModelNode::ModelNode(std::string id)
       thread_(nullptr),
       raw_frame_(1),
       jpeg_frame_(1),
-      websocket_(true),
+      websocket_(false),
       transport_(nullptr),
       camera_(nullptr),
       preview_width_(640),
@@ -552,8 +552,9 @@ ma_err_t ModelNode::onStart() {
     camera_->attach(CHN_RAW, &raw_frame_);
     if (debug_) {
         if (preview_width_ == -1 || preview_height_ == -1) {
-            preview_width_  = img->width;
-            preview_height_ = img->height;
+            // preview "auto": follow the camera node's resolution option at a
+            // memory-safe scale (full-res preview pools exceed the ION budget)
+            camera_->getPreviewRes(preview_width_, preview_height_);
         }
         camera_->config(CHN_JPEG, preview_width_, preview_height_, preview_fps_, MA_PIXEL_FORMAT_JPEG);
         camera_->attach(CHN_JPEG, &jpeg_frame_);

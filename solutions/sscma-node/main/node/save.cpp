@@ -762,9 +762,12 @@ ma_err_t SaveNode::onStart() {
     }
 
     if (saveMode_ == "image") {
+        // capture rides on the JPEG channel at its configured (preview) size;
+        // NOTE: resizing the channel to full 5MP here would need a VB pool
+        // rebuild that the current pipeline cannot do at runtime
         camera_->config(CHN_JPEG);
         camera_->attach(CHN_JPEG, &frame_);
-        MA_LOGI(TAG, "attached to JPEG channel for image saving (using model's configuration)");
+        MA_LOGI(TAG, "attached to JPEG channel for image saving");
     } else {
         camera_->config(CHN_H264);
         camera_->attach(CHN_H264, &frame_);

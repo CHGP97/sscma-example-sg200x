@@ -12,7 +12,14 @@ namespace ma::node {
 #define CHANNELS     1
 #define FORMAT       SND_PCM_FORMAT_S16_LE
 
-enum { CHN_RAW = 0, CHN_JPEG = 1, CHN_H264 = 2, CHN_AUDIO = 3, CHN_MAX };
+// Channel index == physical VPSS channel == VB pool index.
+// Hardware scaler width limits in VI-VPSS online mode are per channel:
+//   chn0(sc_d)=1920, chn1(sc_v1)=2880, chn2(sc_v2)=1920  [cvi_cv181x_defines.h]
+// A channel asked to output wider than its scaler silently stalls the whole
+// pipeline (the kernel tile fallback is disabled for online input), so the
+// only channel allowed to carry >1920-wide video (e.g. 2592x1944 H.264 in
+// Max mode) is CHN_H264, which MUST stay at index 1.
+enum { CHN_RAW = 0, CHN_H264 = 1, CHN_JPEG = 2, CHN_AUDIO = 3, CHN_MAX };
 
 typedef struct {
     int chn;
@@ -91,6 +98,30 @@ public:
     ma_err_t attach(int chn, MessageBox* msgbox);
     ma_err_t detach(int chn, MessageBox* msgbox);
 
+    // still-capture size chosen by the camera node's resolution option
+    // (e.g. 2592x1944 in Max mode), before the model preview reconfigures
+    // the JPEG channel to its preview size
+    void getCaptureRes(int32_t& w, int32_t& h) const {
+        w = capture_w_;
+        h = capture_h_;
+    }
+
+    // preview size: same field of view as capture but capped to the JPEG
+    // channel's scaler limit (sc_v2 = 1920 wide) and to a memory-safe scale.
+    // A full 5MP preview pool (~5.5MB/frame after tile compression) together
+    // with the other pools exceeds the ION budget and crashes the kernel, so
+    // in Max mode the preview runs at an aspect-preserving <=1920 downscale
+    // (2592x1944 -> 1440x1080, no letterboxing: both are 4:3)
+    void getPreviewRes(int32_t& w, int32_t& h) const {
+        if (capture_w_ > 1920) {
+            w = 1920;
+            h = (int)((int64_t)capture_h_ * 1920 / capture_w_ / 2) * 2;
+        } else {
+            w = capture_w_;
+            h = capture_h_;
+        }
+    }
+
 protected:
     void threadEntry();
     void threadAudioEntry();
@@ -112,6 +143,12 @@ private:
     int light_;
     bool mirror_;
     bool flip_;
+    int max_w_;      // sensor max capability (valid when max_res_active_)
+    int max_h_;
+    int max_fps_;
+    bool max_res_active_;  // sensor max exceeds the 1080p default
+    int32_t capture_w_;    // still-capture size from the resolution option
+    int32_t capture_h_;
     Thread* thread_;
     Thread* thread_audio_;
     MessageBox frame_;
