@@ -30,6 +30,7 @@ typedef struct {
     uint32_t width;
     uint32_t height;
     uint8_t fps;
+    uint8_t blkcnt; // vb pool block count override; 0 = keep default
 } video_ch_param_t;
 
 // typedef struct {
@@ -50,6 +51,9 @@ int getVideoMirror();
 int getVideoFlip();
 int setupVideo(video_ch_index_t ch, const video_ch_param_t* param);
 int registerVideoFrameHandler(video_ch_index_t ch, int index, pfpDataConsumes handler, void* pUserData);
+
+// max capability of the attached sensor ({w, h, fps}); 0 on success
+int getVideoSnsMaxRes(uint32_t* w, uint32_t* h, uint8_t* fps);
 
 #ifdef __cplusplus
 }

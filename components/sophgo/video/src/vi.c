@@ -224,6 +224,12 @@ static int app_ipcam_Vi_Dev_Start(void) {
         stViDevAttr.stSize.u32Width     = pstChnCfg->u32Width;
         stViDevAttr.stSize.u32Height    = pstChnCfg->u32Height;
         stViDevAttr.stWDRAttr.enWDRMode = pstChnCfg->enWDRMode;
+        stViDevAttr.stWDRAttr.u32CacheLine = pstChnCfg->u32Height;
+        /* above 1080p the sensor timing does not work with the SBM slice
+         * path (VPSS jobs never complete); fall back to the frame-based
+         * dram pipeline by disabling SBM */
+        if (pstChnCfg->u32Width > 1920)
+            stViDevAttr.disEnableSbm = CVI_TRUE;
         s32Ret                          = CVI_VI_SetDevAttr(ViDev, &stViDevAttr);
         APP_IPCAM_CHECK_RET(s32Ret, "CVI_VI_SetDevAttr(%d) failed!\n", ViDev);
 

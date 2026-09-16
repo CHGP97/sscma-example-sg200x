@@ -171,7 +171,10 @@ static const APP_VENC_CHN_CFG_S venc_h264 = {
     .u32IQp           = 38,
     .u32PQp           = 38,
     .statTime         = 2,
-    .enBindMode       = VENC_BIND_VPSS,
+    // pump mode (venc thread pulls VPSS frames) instead of the hardware bind:
+    // the bind path deadlocks the whole pipeline at 5MP-class loads on this
+    // BSP, while the pump path is proven to work (the JPEG channel uses it)
+    .enBindMode       = VENC_BIND_DISABLE,
     .astChn[0] =
         {
             // src
@@ -278,6 +281,22 @@ static const APP_VENC_CHN_CFG_S venc_jpeg = {
 
 static const APP_VENC_ROI_CFG_S roi_cfg = {0};
 
+static APP_RES_MODE_E s_resMode = APP_RES_MODE_DEFAULT;
+
+static void apply_venc_res_mode(APP_VENC_CHN_CFG_S* pvchn) {
+    if (s_resMode != APP_RES_MODE_MAX) {
+        return;
+    }
+    // 5MP-class streams need more headroom than the 1080p defaults
+    if (pvchn->enType == PT_H264 || pvchn->enType == PT_H265) {
+        pvchn->u32BitRate       = 4096;
+        pvchn->u32MaxBitRate    = 4096;
+        pvchn->u32StreamBufSize = (1024 << 10);
+    } else if (pvchn->enType == PT_JPEG) {
+        pvchn->u32StreamBufSize = (2048 << 10);
+    }
+}
+
 int app_ipcam_Param_setVencChnType(int ch, PAYLOAD_TYPE_E enType) {
     APP_PARAM_VENC_CTX_S* venc = app_ipcam_Venc_Param_Get();
 
@@ -310,11 +329,55 @@ int app_ipcam_Param_setVencChnType(int ch, PAYLOAD_TYPE_E enType) {
     pvchn->astChn[1].enModId  = CVI_ID_VENC;
     pvchn->astChn[1].s32DevId = 0;  // dst
     pvchn->astChn[1].s32ChnId = ch;
+    apply_venc_res_mode(pvchn);
 
     return CVI_SUCCESS;
 }
 
 static const APP_PARAM_SNS_CFG_T* supported_sensors[] = {&sns_cfg_ov5647, &sns_cfg_sc530ai, &sns_cfg_gc2053};
+
+// sensor max capability: {type, width, height, max fps}
+typedef struct {
+    SENSOR_TYPE_E enSnsType;
+    uint16_t u16Width;
+    uint16_t u16Height;
+    uint8_t u8Fps;
+} APP_SNS_MAX_RES_S;
+
+static const APP_SNS_MAX_RES_S sns_max_res_tbl[] = {
+    {SENSOR_OV_OV5647, 2592, 1944, 15},
+    {SENSOR_SMS_SC530AI_2L, 2880, 1620, 30},
+    {SENSOR_GCORE_GC2053, 1920, 1080, 30},
+};
+
+int app_ipcam_Param_SetResMode(APP_RES_MODE_E mode) {
+    s_resMode = mode;
+    return CVI_SUCCESS;
+}
+
+APP_RES_MODE_E app_ipcam_Param_GetResMode(void) {
+    return s_resMode;
+}
+
+int app_ipcam_Get_SnsMaxRes(uint16_t* w, uint16_t* h, uint8_t* fps) {
+    APP_PARAM_VI_CTX_S* vi = app_ipcam_Vi_Param_Get();
+
+    if (vi->astSensorCfg[0].enSnsType == 0) {
+        // param not loaded yet
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < sizeof(sns_max_res_tbl) / sizeof(sns_max_res_tbl[0]); i++) {
+        if (sns_max_res_tbl[i].enSnsType == vi->astSensorCfg[0].enSnsType) {
+            if (w) *w = sns_max_res_tbl[i].u16Width;
+            if (h) *h = sns_max_res_tbl[i].u16Height;
+            if (fps) *fps = sns_max_res_tbl[i].u8Fps;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static const APP_PARAM_SNS_CFG_T* vi_sensor_identify(void) {
     VI_PIPE ViPipe = 0;
     CVI_S32 s32Ret = CVI_SUCCESS;
@@ -385,6 +448,34 @@ static void fix_vi_grp_attr(const APP_PARAM_SNS_CFG_T* pstSnsCfg, VPSS_GRP_ATTR_
     }
 }
 
+// apply APP_RES_MODE_MAX on top of the sensor defaults: run VI/VPSS at the
+// sensor's native maximum instead of 1080p (no-op when max == 1080p).
+static void apply_res_mode_max(APP_PARAM_SNS_CFG_T* sns_cfg, APP_PARAM_CHN_CFG_T* chn_cfg, VPSS_GRP_ATTR_S* grp_attr) {
+    uint16_t w = 0, h = 0;
+    uint8_t fps = 0;
+
+    if (s_resMode != APP_RES_MODE_MAX) {
+        return;
+    }
+    if (app_ipcam_Get_SnsMaxRes(&w, &h, &fps) != 0) {
+        return;
+    }
+    if (w == chn_cfg->u32Width && h == chn_cfg->u32Height) {
+        return; // sensor max equals the default, nothing to do
+    }
+
+    chn_cfg->u32Width    = w;
+    chn_cfg->u32Height   = h;
+    chn_cfg->f32Fps      = fps;
+    sns_cfg->s32Framerate = fps;
+    grp_attr->u32MaxW    = w;
+    grp_attr->u32MaxH    = h;
+    /* NOTE: VI_OFFLINE_VPSS_OFFLINE was tried here for >1080p but the video
+     * init blocks in the kernel (executor hang); the online path runs but
+     * VPSS jobs never complete above 1080p geometry on this BSP. */
+    APP_PROF_LOG_PRINT(LEVEL_INFO, "res mode MAX: %ux%u@%d\n", w, h, fps);
+}
+
 #define APP_IPCAM_CHN_NUM 3
 
 extern ISP_SNS_MIRRORFLIP_TYPE_E g_aeOv5647_MirrorFip[VI_MAX_PIPE_NUM];
@@ -438,6 +529,16 @@ int app_ipcam_Param_Load(void) {
     pgrp->VpssGrp              = 0;
     pgrp->stVpssGrpAttr        = grp_attr;
     fix_vi_grp_attr(pstSnsCfg, &pgrp->stVpssGrpAttr);
+
+    // sensor max resolution mode (applied after the sensor defaults)
+    apply_res_mode_max(&vi->astSensorCfg[0], &vi->astChnInfo[0], &pgrp->stVpssGrpAttr);
+    if (s_resMode == APP_RES_MODE_MAX) {
+        // 5MP-class pools (~7.7MB/frame) blow the ION budget at the default
+        // 4 blocks per pool — cap every pool at 2 blocks in max mode
+        for (uint32_t i = 0; i < sys->vb_pool_num; i++) {
+            sys->vb_pool[i].vb_blk_num = 2;
+        }
+    }
     pgrp->stVpssGrpAttr.u8VpssDev = 0;
     pgrp->bBindMode               = 0;
     pgrp->astChn[0].enModId       = CVI_ID_VI;  // src

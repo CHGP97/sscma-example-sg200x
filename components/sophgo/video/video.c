@@ -21,12 +21,26 @@ static int setVbPool(video_ch_index_t ch, const video_ch_param_t* param) {
     vb->width              = param->width;
     vb->height             = param->height;
     vb->fmt                = (param->format == VIDEO_FORMAT_RGB888) ? PIXEL_FORMAT_RGB_888 : PIXEL_FORMAT_NV21;
+    if (param->blkcnt > 0) {
+        vb->vb_blk_num = param->blkcnt;
+    }
 
     return 0;
 }
 
 static int setGrpChn(int grp, video_ch_index_t ch, const video_ch_param_t* param) {
     APP_PARAM_VPSS_CFG_T* vpss = app_ipcam_Vpss_Param_Get();
+
+    /* VPSS channel output width limits in VI-VPSS online mode (per-channel
+     * scaler assignment: sc_d/sc_v1/sc_v2). Exceeding the limit makes the
+     * kernel hand the hardware an impossible job that silently never
+     * completes (the tile fallback is disabled for online input), so reject
+     * it here where it is observable. */
+    static const uint32_t chn_max_w[VIDEO_CH_MAX] = {1920, 2880, 1920};
+    if (param->width > chn_max_w[ch]) {
+        APP_PROF_LOG_PRINT(LEVEL_ERROR, "chn(%d) width(%d) exceeds scaler limit(%d)\n", ch, param->width, chn_max_w[ch]);
+        return -1;
+    }
 
     if (grp >= vpss->u32GrpCnt) {
         APP_PROF_LOG_PRINT(LEVEL_ERROR, "grp(%d) > u32GrpCnt(%d)\n", grp, vpss->u32GrpCnt);
@@ -139,6 +153,17 @@ int setupVideo(video_ch_index_t ch, const video_ch_param_t* param) {
 
 int registerVideoFrameHandler(video_ch_index_t ch, int index, pfpDataConsumes handler, void* pUserData) {
     app_ipcam_Venc_Consumes_Set(ch, index, handler, pUserData);
+    return 0;
+}
+
+int getVideoSnsMaxRes(uint32_t* w, uint32_t* h, uint8_t* fps) {
+    uint16_t w16 = 0, h16 = 0;
+
+    if (app_ipcam_Get_SnsMaxRes(&w16, &h16, fps) != 0) {
+        return -1;
+    }
+    if (w) *w = w16;
+    if (h) *h = h16;
     return 0;
 }
 
