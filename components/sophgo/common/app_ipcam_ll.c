@@ -75,16 +75,15 @@ int app_ipcam_LList_Data_Pop(void **pData, void *pArgs)
     APP_DATA_CTX_S *pstDataCtx = (APP_DATA_CTX_S *)pArgs;
 
     APP_LINK_LIST_S *pHeadLink = &pstDataCtx->stHead.link;
-    if (LL_EMPTY(pHeadLink)) {
-        return -1;
-    }
-
     APP_DATA_LL_S *pNodePop = NULL;
 
+    // head must be read under the mutex: Push mutates it concurrently
     pthread_mutex_lock(&pstDataCtx->mutex);
-    LINK_LIST_DATA_POP_FRONT(pNodePop, pHeadLink, link);
-    if(pNodePop) {
-        pstDataCtx->LListDepth--;
+    if (!LL_EMPTY(pHeadLink)) {
+        LINK_LIST_DATA_POP_FRONT(pNodePop, pHeadLink, link);
+        if(pNodePop) {
+            pstDataCtx->LListDepth--;
+        }
     }
     pthread_mutex_unlock(&pstDataCtx->mutex);
 
@@ -129,7 +128,13 @@ int app_ipcam_LList_Data_Push(void *pData, void *pArgs)
         return -1;
     }
 
-    if (pstDataCtx->LListDepth > LL_DATA_CACHE_DEPTH_MAX) {
+    // read depth under the mutex: it is updated by Pop/Push on other threads
+    bool bNeedDrop = false;
+    pthread_mutex_lock(&pstDataCtx->mutex);
+    bNeedDrop = (pstDataCtx->LListDepth > LL_DATA_CACHE_DEPTH_MAX);
+    pthread_mutex_unlock(&pstDataCtx->mutex);
+
+    if (bNeedDrop) {
         void *pDataDrop = NULL;
         printf("LL cache is full and drop data. (LList depth:%d > Max:%d) \n", pstDataCtx->LListDepth, LL_DATA_CACHE_DEPTH_MAX);
         if (app_ipcam_LList_Data_Pop(&pDataDrop, pArgs) != 0) {

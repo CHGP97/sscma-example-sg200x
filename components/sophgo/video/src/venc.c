@@ -888,13 +888,32 @@ static void* Thread_Streaming_Proc(void* pArgs)
     APP_PROF_LOG_PRINT(LEVEL_INFO, "Venc channel_%d start running\n", VencChn);
 
     pastVencChnCfg->bStart = CVI_TRUE;
+
+    // allocated once and reused: GetStream fills it every frame
+    VENC_PACK_S *pstPacks = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S) * H26X_MAX_NUM_PACKS);
+    if (pstPacks == NULL) {
+        APP_PROF_LOG_PRINT(LEVEL_ERROR, "streaming malloc memory failed!\n");
+        return (CVI_VOID *)CVI_FAILURE;
+    }
+
+    VIDEO_FRAME_INFO_S stVpssFrame = { 0 };
+    bool bFrameHeld = false; // VPSS frame acquired, not yet released
+
     while (pastVencChnCfg->bStart) {
-        VIDEO_FRAME_INFO_S stVpssFrame = { 0 };
+        // a frame from the previous iteration (left held by select timeout /
+        // EINTR continues) must be released before acquiring a new one,
+        // otherwise VB blocks leak until the pool is exhausted
+        if (bFrameHeld) {
+            CVI_VPSS_ReleaseChnFrame(vpssGrp, vpssChn, &stVpssFrame);
+            bFrameHeld = false;
+        }
+        stVpssFrame = (VIDEO_FRAME_INFO_S){ 0 };
 
         if (pastVencChnCfg->enBindMode == VENC_BIND_DISABLE) {
             if (CVI_VPSS_GetChnFrame(vpssGrp, vpssChn, &stVpssFrame, 3000) != CVI_SUCCESS) {
                 continue;
             }
+            bFrameHeld = true;
             APP_PROF_LOG_PRINT(LEVEL_DEBUG, "VencChn-%d Get Frame takes %u ms \n", VencChn, (GetCurTimeInMsec() - iTime));
             iTime = GetCurTimeInMsec();
 
@@ -908,12 +927,14 @@ static void* Thread_Streaming_Proc(void* pArgs)
                 s32Ret = CVI_VPSS_ReleaseChnFrame(vpssGrp, vpssChn, &stVpssFrame);
                 if (s32Ret != CVI_SUCCESS)
                     APP_PROF_LOG_PRINT(LEVEL_ERROR, "vpss release Chn-frame failed with:0x%x\n", s32Ret);
+                bFrameHeld = false;
                 continue;
             } else if (CVI_VENC_SendFrame(VencChn, &stVpssFrame, 3000) != CVI_SUCCESS) { /* takes 0~1ms */
                 APP_PROF_LOG_PRINT(LEVEL_ERROR, "Venc send frame failed with %#x\n", s32Ret);
                 s32Ret = CVI_VPSS_ReleaseChnFrame(vpssGrp, vpssChn, &stVpssFrame);
                 if (s32Ret != CVI_SUCCESS)
                     APP_PROF_LOG_PRINT(LEVEL_ERROR, "vpss release Chn-frame failed with:0x%x\n", s32Ret);
+                bFrameHeld = false;
                 continue;
             }
         }
@@ -946,11 +967,7 @@ static void* Thread_Streaming_Proc(void* pArgs)
 
         // get stream
         VENC_STREAM_S stStream = { 0 };
-        stStream.pstPack = (VENC_PACK_S*)malloc(sizeof(VENC_PACK_S) * H26X_MAX_NUM_PACKS);
-        if (stStream.pstPack == NULL) {
-            APP_PROF_LOG_PRINT(LEVEL_ERROR, "streaming malloc memory failed!\n");
-            break;
-        }
+        stStream.pstPack = pstPacks;
 
         ISP_EXP_INFO_S stExpInfo;
         memset(&stExpInfo, 0, sizeof(stExpInfo));
@@ -959,6 +976,7 @@ static void* Thread_Streaming_Proc(void* pArgs)
         s32Ret = CVI_VENC_GetStream(VencChn, &stStream, timeout);
         if (pastVencChnCfg->enBindMode == VENC_BIND_DISABLE) {
             CVI_VPSS_ReleaseChnFrame(vpssGrp, vpssChn, &stVpssFrame);
+            bFrameHeld = false;
         }
         if (s32Ret != CVI_SUCCESS || (0 == stStream.u32PackCount)) {
             APP_PROF_LOG_PRINT(LEVEL_WARN, "CVI_VENC_GetStream, VencChn(%d) cnt(%d), s32Ret = 0x%X timeout:%d %d\n",
@@ -983,10 +1001,15 @@ static void* Thread_Streaming_Proc(void* pArgs)
             goto CONTINUE;
         }
 
-    CONTINUE:
-        free(stStream.pstPack);
-        stStream.pstPack = NULL;
+    CONTINUE:;
     }
+
+    // a frame may still be held when leaving via break/continue-guarded exits
+    if (bFrameHeld) {
+        CVI_VPSS_ReleaseChnFrame(vpssGrp, vpssChn, &stVpssFrame);
+    }
+
+    free(pstPacks);
 
     return (CVI_VOID*)CVI_SUCCESS;
 }

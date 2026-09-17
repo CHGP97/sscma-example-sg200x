@@ -371,8 +371,8 @@ static int app_ipcam_Vi_Chn_Start() {
         s32Ret = CVI_VI_EnableChn(ViPipe, ViChn);
 
         {
-            bool flip = false;
-            bool mirror = false;
+            CVI_BOOL flip = CVI_FALSE;
+            CVI_BOOL mirror = CVI_FALSE;
             CVI_VI_GetChnFlipMirror(ViPipe, ViChn, &flip, &mirror);
             if (getVideoFlip()) {
                 flip = !flip;

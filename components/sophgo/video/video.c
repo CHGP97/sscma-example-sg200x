@@ -115,6 +115,7 @@ int deinitVideo(void) {
         APP_CHK_RET(app_ipcam_Sys_DeInit(), "System DeInit");
         is_started = false;
     }
+    return 0;
 }
 
 int startVideo() {
@@ -144,9 +145,15 @@ int setupVideo(video_ch_index_t ch, const video_ch_param_t* param) {
         return -1;
     }
 
-    setVbPool(ch, param);
-    setGrpChn(0, ch, param);
-    setVencChn(ch, param);
+    if (setVbPool(ch, param) != 0) {
+        return -1;
+    }
+    if (setGrpChn(0, ch, param) != 0) {
+        return -1;
+    }
+    if (setVencChn(ch, param) != 0) {
+        return -1;
+    }
 
     return 0;
 }
@@ -169,9 +176,11 @@ int getVideoSnsMaxRes(uint32_t* w, uint32_t* h, uint8_t* fps) {
 
 int setVideoMirror(bool mirror) {
     video_mirror = mirror;
+    return 0;
 }
 int setVideoFlip(bool flip) {
     video_flip = flip;
+    return 0;
 }
 int getVideoMirror() {
     return video_mirror;
