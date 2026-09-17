@@ -117,7 +117,7 @@ void api_wifi::start_wifi()
     auto&& conf = parse_result(script(__func__));
     _sta_enable = conf.value("sta", 1);
     _ap_enable = conf.value("ap", 1);
-    LOGV("sta_enable: %d, ap_enable: %d", _sta_enable, _ap_enable);
+    LOGV("sta_enable: %d, ap_enable: %d", _sta_enable, _ap_enable.load());
 
     int sta = 2; // no wifi
     if (_sta_enable != -1)
@@ -327,6 +327,8 @@ api_status_t api_wifi::switchWiFi(request_t req, response_t res)
     int sta = 2; // 0=disabled 1=enabled 2=no wifi
     if (_sta_enable != -1)
         sta = _sta_enable;
+    // _nw_info is shared with the scan worker thread
+    std::lock_guard<std::mutex> lock(_wifi_mutex);
     _nw_info["wifiEnable"] = sta;
     return API_STATUS_OK;
 }

@@ -54,7 +54,10 @@ private:
     static inline int _sta_enable = 1;
     static inline int _antennaMode = 1;
     static inline json _nw_info;
-    static inline int8_t _failed_cnt = 10;
+    // written by http workers without the mutex, read/updated by the scan
+    // worker under _halow_mutex - keep it atomic (int: native width, riscv64
+    // has no byte-sized atomic instructions)
+    static inline std::atomic<int> _failed_cnt { 10 };
 
     // Ping task
     static inline std::thread _ping_worker;
@@ -72,7 +75,7 @@ private:
     static inline std::atomic<bool> _running { true };
     static inline std::condition_variable _cv;
     static inline std::mutex _halow_mutex;
-    static inline bool _need_scan;
+    static inline std::atomic<bool> _need_scan { false };
     static void trigger_scan()
     {
         _need_scan = true;

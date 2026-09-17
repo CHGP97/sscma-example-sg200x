@@ -297,9 +297,8 @@ static json _parse_halow_scan(std::string fname)
                 jlist.push_back(j);
             }
         }
-        if (!j.empty() && !j.value("ssid", "").empty()) {
-            jlist.push_back(j);
-        }
+        // NOTE: no extra push after the loop - every record was already
+        // appended inside it, pushing again duplicated the last entry
     }
     return jlist;
 }
@@ -366,17 +365,22 @@ api_status_t api_halow::switchHalow(request_t req, response_t res)
     int sta = 2; // 0=disabled 1=enabled 2=no halow
     if (_sta_enable != -1)
         sta = _sta_enable;
-    _nw_info["halowEnable"] = sta;
 
     // Stop ping and clear cache if halow is disabled
     if (sta == 0) {
         stop_ping();
-        // Clear halow network info cache
-        _halow_mutex.lock();
-        _nw_info["connectedHalowInfoList"] = json::array();
-        _nw_info["halowInfoList"] = json::array();
-        _nw_info["Selected"] = "";
-        _halow_mutex.unlock();
+    }
+
+    // _nw_info is shared with the scan worker thread
+    {
+        std::lock_guard<std::mutex> lock(_halow_mutex);
+        _nw_info["halowEnable"] = sta;
+        if (sta == 0) {
+            // Clear halow network info cache
+            _nw_info["connectedHalowInfoList"] = json::array();
+            _nw_info["halowInfoList"] = json::array();
+            _nw_info["Selected"] = "";
+        }
     }
 
     return API_STATUS_OK;
@@ -387,7 +391,8 @@ api_status_t api_halow::switchAntenna(request_t req, response_t res)
     _antennaMode = parse_body(req).value("mode", _antennaMode);
     script(__func__, !_antennaMode);
     response(res, 0, STR_OK);
-    // 0 = RF1 1 = RF2
+    // 0 = RF1 1 = RF2, _nw_info is shared with the scan worker thread
+    std::lock_guard<std::mutex> lock(_halow_mutex);
     _nw_info["antennaEnable"] = _antennaMode;
     return API_STATUS_OK;
 }
@@ -401,14 +406,18 @@ void api_halow::start_ping(const std::string& ip, int interval)
     _ping_running = true;
 
     _ping_worker = std::thread([]() {
-        LOGI("Ping task started: ip=%s, interval=%d", _ping_ip.c_str(), _ping_interval.load());
+        // Copy once: a rapid stop/start must not mutate these while running
+        const std::string ip = _ping_ip;
+        const int interval = _ping_interval;
+        LOGI("Ping task started: ip=%s, interval=%d", ip.c_str(), interval);
         while (_ping_running) {
-            std::string cmd = "ping -I halow0 -c 1 -W 1 " + _ping_ip + " >/dev/null 2>&1";
+            std::string cmd = "ping -I halow0 -c 1 -W 1 " + ip + " >/dev/null 2>&1";
             int ret = system(cmd.c_str());
-            // LOGD("Ping %s result: %d", _ping_ip.c_str(), ret);
+            (void)ret;
+            // LOGD("Ping %s result: %d", ip.c_str(), ret);
 
             std::unique_lock<std::mutex> lock(_ping_mutex);
-            if (_ping_cv.wait_for(lock, std::chrono::seconds(_ping_interval), [] { return !_ping_running; })) {
+            if (_ping_cv.wait_for(lock, std::chrono::seconds(interval), [] { return !_ping_running; })) {
                 break;
             }
         }
