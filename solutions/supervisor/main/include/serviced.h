@@ -30,6 +30,13 @@ public:
             bool sys_booting = true;
             bool restart_flow = false;
             uint32_t nodered_failed = 0;
+            uint32_t sscma_failed = 0;
+
+            // consecutive-failure thresholds (1 check ~= 6s)
+            static constexpr uint32_t NODERED_DEAD_RESTART = 3; // process exited, restart fast (~18s)
+            static constexpr uint32_t NODERED_SLOW_WARN = 10; // alive but stuck, warn (~60s)
+            static constexpr uint32_t NODERED_SLOW_RESTART = 30; // stuck too long, restart (~3min)
+            static constexpr uint32_t SSCMA_RESTART = 5; // debounce transient mqtt timeouts (~30s)
 
             running_ = true;
             while (running_) {
@@ -47,22 +54,45 @@ public:
                 sys_booting = false;
 
                 if (nodered_status_ != STATUS_NORMAL) {
-                    LOGV("nodered_failed=%d", nodered_failed);
-                    if (10 == nodered_failed) { // Continuous failure
-                        start_service("nodered");
+                    if (0 == nodered_failed) {
+                        LOGW("nodered unhealthy (%s)",
+                            nodered_dead_ ? "process dead" : "not responding");
                     }
-                    if (nodered_failed++ > 30) { // Timeout, will start again
-                        nodered_failed = 0;
+                    ++nodered_failed;
+                    if (nodered_dead_) {
+                        if (nodered_failed >= NODERED_DEAD_RESTART) {
+                            start_service("nodered");
+                            nodered_failed = 0;
+                        }
+                    } else {
+                        // node-red needs ~70s to start on this board, keep the
+                        // restart threshold well above it to avoid kill loops
+                        if (nodered_failed == NODERED_SLOW_WARN) {
+                            LOGW("nodered not responding for %d checks", nodered_failed);
+                        }
+                        if (nodered_failed >= NODERED_SLOW_RESTART) {
+                            LOGW("nodered not responding too long, restart");
+                            start_service("nodered");
+                            nodered_failed = 0;
+                        }
                     }
                     continue;
                 }
                 nodered_failed = 0;
 
                 if (sscma_status_ != STATUS_NORMAL) {
-                    start_service("sscma");
-                    restart_flow = true;
+                    if (0 == sscma_failed) {
+                        LOGW("sscma unhealthy");
+                    }
+                    // debounce: a single mqtt timeout should not restart the service
+                    if (++sscma_failed >= SSCMA_RESTART) {
+                        start_service("sscma");
+                        restart_flow = true;
+                        sscma_failed = 0;
+                    }
                     continue; // To check sscma ready
                 }
+                sscma_failed = 0;
                 if (restart_flow) {
                     LOGW("Restart flow");
                     api_base::script("ctrl_flow", "stop");
@@ -96,6 +126,7 @@ private:
 
     status_t sscma_status_ = STATUS_UNKOWN;
     status_t nodered_status_ = STATUS_UNKOWN;
+    bool nodered_dead_ = false;
     // status_t flow_status_ = STATUS_UNKOWN;
 
     void query_sscma()
@@ -122,6 +153,12 @@ private:
     {
         nodered_status_ = STATUS_NORMAL;
         std::string result = api_base::script(__func__);
+        if (result == "Dead") {
+            nodered_dead_ = true;
+            nodered_status_ = STATUS_FAILED;
+            return;
+        }
+        nodered_dead_ = false;
         if (result.empty() || result != "OK") {
             nodered_status_ = STATUS_FAILED;
             return;

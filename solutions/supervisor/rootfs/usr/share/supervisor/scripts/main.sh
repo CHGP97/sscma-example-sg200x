@@ -71,6 +71,20 @@ _stop_pidname() {
     for pid in $(pidof "$1"); do [ -d "/proc/$pid" ] && kill -$sig $pid; done
 }
 
+# SIGTERM first, escalate to SIGKILL only after the grace period so
+# node-red flows get a chance to run their close handlers
+_stop_pidname_graceful() {
+    local name="$1" timeout="${2:-10}"
+    for pid in $(pidof "$name"); do [ -d "/proc/$pid" ] && kill -TERM "$pid"; done
+    local i=0
+    while [ "$i" -lt "$((timeout * 2))" ]; do
+        [ -z "$(pidof "$name")" ] && return 0
+        sleep 0.5
+        i=$((i + 1))
+    done
+    for pid in $(pidof "$name"); do [ -d "/proc/$pid" ] && kill -9 "$pid"; done
+}
+
 ##################################################
 # file
 api_file() { echo "$USERDATA_DIR"; }
@@ -93,7 +107,7 @@ function getDeviceList() {
 
 function updateDeviceName() {
     local dev_name=$2
-    if [ -z $dev_name ]; then
+    if [ -z "$dev_name" ]; then
         echo $STR_FAILED
         exit 1
     fi
@@ -172,7 +186,7 @@ function cancelUpdate() {
 }
 
 _upgrade_latest() {
-    local url
+    local url=""
     local ch=$(cat $CONF_UPGRADE 2>/dev/null | awk -F'[, ]' '{print $1}')
     [ $((ch)) -ne 0 ] && {
         url=$(cat $CONF_UPGRADE 2>/dev/null | awk -F'[, ]' '{print $2}')
@@ -518,7 +532,11 @@ function stop_wifi() {
 
 function switchWiFi() {
     echo $2 >"$CONF_WIFI"
-    [ "$2" = "0" ] && stop_wifi || start_wifi
+    if [ "$2" = "0" ]; then
+        stop_wifi
+    else
+        start_wifi
+    fi
 }
 
 function get_sta_connected() {
@@ -927,6 +945,12 @@ function query_sscma() {
 }
 
 function query_nodered() {
+    # Distinguish "process exited" from "alive but not responding",
+    # so the caller can restart fast on death and debounce on hangs
+    if [ -z "$(pidof node-red)" ] && [ -z "$(pidof node)" ]; then
+        echo "Dead"
+        return
+    fi
     local result="$(curl -I --connect-timeout 2 --max-time 10 "localhost:1880" 2>/dev/null)"
     [ -z "$result" ] && {
         echo "$STR_FAILED"
@@ -946,7 +970,9 @@ function query_flow() {
 
 function ctrl_flow() {
     local state="$2"
-    curl -s -X POST -H "Content-Type: application/json" -d "{\"state\":\"$state\"}" http://localhost:1880/flows/state
+    # timeouts required: a hung curl here blocks the supervisor monitor thread
+    curl -s --connect-timeout 2 --max-time 10 -X POST -H "Content-Type: application/json" \
+        -d "{\"state\":\"$state\"}" http://localhost:1880/flows/state
 }
 
 function start_service() {
@@ -961,8 +987,11 @@ function start_service() {
         echo "$STR_OK"
         ;;
     "nodered")
-        _stop_pidname "sscma-node" 1
-        _stop_pidname "node"
+        # NOTE: do not signal sscma-node here. Killing it as a side effect
+        # guaranteed a second sscma restart + flow restart ~75s later;
+        # the supervisor health loop handles a really-broken sscma itself.
+        _stop_pidname_graceful "node-red" 10
+        _stop_pidname_graceful "node" 10
         /etc/init.d/S03node-red restart >/dev/null 2>&1
         [ $? -ne 0 ] && {
             echo "$STR_FAILED"
@@ -980,4 +1009,9 @@ function start_service() {
 ##################################################
 
 # call function
-$1 "$@"
+if [ -n "$1" ] && declare -f "$1" >/dev/null 2>&1; then
+    "$1" "$@"
+else
+    echo "Unknown command: $1" >&2
+    exit 1
+fi
