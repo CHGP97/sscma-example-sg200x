@@ -49,6 +49,11 @@ int CameraSG200X::vencCallback(void* pData, void* pArgs) {
     APP_VENC_CHN_CFG_S* pstVencChnCfg = (APP_VENC_CHN_CFG_S*)pstDataParam->pParam;
     VENC_CHN VencChn                  = pstVencChnCfg->VencChn;
 
+    // bounds check BEFORE indexing m_channels
+    if (VencChn >= CHN_MAX || m_channels[VencChn].queue == nullptr) {
+        return CVI_SUCCESS;
+    }
+
     if (!m_streaming) {
         return CVI_SUCCESS;
     }
@@ -69,6 +74,7 @@ int CameraSG200X::vencCallback(void* pData, void* pArgs) {
         frame->count     = pstStream->u32PackCount;
         frame->index     = i;
         frame->physical  = false;
+        frame->key       = false;
         if (m_channels[VencChn].format == MA_PIXEL_FORMAT_H264) {
             switch (ppack->DataType.enH264EType) {
                 case H264E_NALU_ISLICE:
@@ -97,6 +103,10 @@ int CameraSG200X::vpssCallback(void* pData, void* pArgs) {
     VIDEO_FRAME_INFO_S* VpssFrame     = (VIDEO_FRAME_INFO_S*)pData;
     VIDEO_FRAME_S* f                  = &VpssFrame->stVFrame;
 
+    // bounds check BEFORE indexing m_channels
+    if (pstVencChnCfg->VencChn >= CHN_MAX || m_channels[pstVencChnCfg->VencChn].queue == nullptr) {
+        return CVI_SUCCESS;
+    }
 
     if (!m_streaming) {
         return CVI_SUCCESS;
@@ -158,6 +168,7 @@ CameraSG200X::CameraSG200X(size_t id) : Camera(id) {
         m_channels[i].configured = false;
         m_channels[i].enabled    = false;
         m_channels[i].fps        = 30;
+        m_channels[i].queue      = nullptr;
     }
     m_channels[CHN_RAW].format  = MA_PIXEL_FORMAT_RGB888;
     m_channels[CHN_JPEG].format = MA_PIXEL_FORMAT_JPEG;
@@ -198,6 +209,14 @@ void CameraSG200X::deInit() noexcept {
     }
     if (m_streaming) [[unlikely]] {
         stopStream();
+    }
+
+    // release per-channel queues allocated by startStream()
+    for (int i = 0; i < CHN_MAX; i++) {
+        if (m_channels[i].queue != nullptr) {
+            delete m_channels[i].queue;
+            m_channels[i].queue = nullptr;
+        }
     }
 
     m_initialized = false;

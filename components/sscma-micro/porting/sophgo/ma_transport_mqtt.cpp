@@ -81,6 +81,11 @@ TransportMQTT::~TransportMQTT() noexcept {
     }
 
     mosquitto_lib_cleanup();
+
+    if (m_receiveBuffer) {
+        delete m_receiveBuffer;
+        m_receiveBuffer = nullptr;
+    }
 }
 
 size_t TransportMQTT::available() const noexcept {

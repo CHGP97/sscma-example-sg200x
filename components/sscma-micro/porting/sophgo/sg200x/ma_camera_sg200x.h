@@ -23,7 +23,7 @@ class CameraSG200X final : public Camera {
         ma_pixel_format_t format;
         bool configured;
         bool enabled;
-        MessageBox* queue;
+        MessageBox* queue = nullptr;
     } channel;
 
 public:

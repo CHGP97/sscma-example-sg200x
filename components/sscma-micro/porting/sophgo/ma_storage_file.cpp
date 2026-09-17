@@ -140,7 +140,9 @@ ma_err_t StorageFile::set(const std::string& key, const void* value, size_t size
 ma_err_t StorageFile::get(const std::string& key, std::string& value) noexcept {
     Guard guard(mutex_);
     cJSON* node = getNode(key);
-    if (!node) {
+    if (!node || !cJSON_IsString(node) || node->valuestring == nullptr) {
+        // a number/object node has valuestring == NULL, assigning it to
+        // std::string would crash
         return MA_ENOENT;
     }
     value = node->valuestring;
