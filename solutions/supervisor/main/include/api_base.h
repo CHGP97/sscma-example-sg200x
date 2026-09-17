@@ -7,9 +7,11 @@
 #include <fcntl.h>
 #include <fstream>
 #include <memory>
+#include <poll.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
@@ -103,56 +105,91 @@ public:
         std::string args_str = ss.str();
         std::string full_cmd = _script + " " + cmd + " " + args_str;
 
-        std::unique_ptr<FILE, decltype(&pclose)>
-            pipe(popen(full_cmd.c_str(), "r"), pclose);
         LOGV("Executing: %s", full_cmd.c_str());
 
-        if (!pipe) {
-            LOGE("popen() failed: %s, errno=%d, strerror=%s",
+        // fork + pipe instead of popen: on timeout we must be able to kill
+        // the child process group, otherwise a hung command (e.g. curl)
+        // blocks pclose() and stalls the caller forever.
+        int fds[2];
+        if (pipe(fds) != 0) {
+            LOGE("pipe() failed: %s, errno=%d, strerror=%s",
                 full_cmd.c_str(), errno, strerror(errno));
-            // throw std::runtime_error("popen() failed for: " + full_cmd);
             return "";
         }
 
-        // non-blocking read
-        int fd = fileno(pipe.get());
-        int flags = fcntl(fd, F_GETFL, 0);
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        pid_t pid = fork();
+        if (pid < 0) {
+            close(fds[0]);
+            close(fds[1]);
+            LOGE("fork() failed: %s, errno=%d, strerror=%s",
+                full_cmd.c_str(), errno, strerror(errno));
+            return "";
+        }
 
-        std::vector<char> buffer(512);
+        if (pid == 0) {
+            // child: own process group, stdout to the pipe
+            setpgid(0, 0);
+            close(fds[0]);
+            dup2(fds[1], STDOUT_FILENO);
+            if (fds[1] != STDOUT_FILENO) {
+                close(fds[1]);
+            }
+            execl("/bin/sh", "sh", "-c", full_cmd.c_str(), (char*)nullptr);
+            _exit(127);
+        }
+        setpgid(pid, pid); // no-op if the child already did it
+
+        close(fds[1]);
+        fds[1] = -1;
+
         std::string result = "";
+        char buffer[512];
         time_t start_time = time(nullptr);
+        bool timed_out = false;
 
+        struct pollfd pfd = { fds[0], POLLIN, 0 };
         while (true) {
             if (time(nullptr) - start_time > timeout_sec) {
-                LOGE("Command timeout after %d seconds: %s", timeout_sec, full_cmd.c_str());
-                // throw std::runtime_error("Command execution timeout: " + full_cmd);
+                timed_out = true;
                 break;
             }
 
-            ssize_t bytes_read = read(fd, buffer.data(), buffer.size());
-            if (bytes_read > 0) {
-                result.append(buffer.data(), bytes_read);
-            } else if (bytes_read == 0) {
-                break; // EOF
-            } else {
-                if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    LOGE("read() error: %s, errno=%d", strerror(errno), errno);
-                    // throw std::runtime_error("read() error during command execution");
-                    break;
+            int ret = poll(&pfd, 1, 1000);
+            if (ret < 0) {
+                if (errno == EINTR)
+                    continue;
+                break;
+            }
+            if (ret == 0)
+                continue; // poll timeout, re-check the deadline
+
+            if (pfd.revents & (POLLIN | POLLHUP)) {
+                ssize_t bytes_read = read(fds[0], buffer, sizeof(buffer));
+                if (bytes_read > 0) {
+                    result.append(buffer, bytes_read);
+                    continue;
                 }
-                usleep(1000); // 1ms
+                if (bytes_read < 0 && errno == EINTR) {
+                    continue; // interrupted by a signal, not EOF
+                }
+                break; // EOF or error
+            }
+            if (pfd.revents & (POLLERR | POLLNVAL)) {
+                break;
             }
         }
 
-        // Get exit status
-        int status = pclose(pipe.release());
-        if (WIFEXITED(status)) {
-            // int exit_status = WEXITSTATUS(status);
-            // if (exit_status != 0) {
-            //     LOGE("Command exited with status %d", exit_status);
-            // }
-        } else {
+        if (timed_out) {
+            LOGE("Command timeout after %d seconds, killing pid %d: %s",
+                timeout_sec, pid, full_cmd.c_str());
+            kill(-pid, SIGKILL); // the whole process group
+        }
+        close(fds[0]);
+
+        // Reap the child (returns immediately after SIGKILL)
+        int status = 0;
+        waitpid(pid, &status, 0);
+        if (!timed_out && !WIFEXITED(status)) {
             LOGE("Command terminated abnormally: %s, status=%d", full_cmd.c_str(), status);
         }
 

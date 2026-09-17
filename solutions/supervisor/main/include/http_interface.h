@@ -1,6 +1,9 @@
 #ifndef _HTTP_INTERFACE_H_
 #define _HTTP_INTERFACE_H_
 
+#include <iterator>
+#include <mutex>
+
 #include "json.hpp"
 #include "mongoose.h"
 
@@ -136,19 +139,27 @@ protected:
 
     static void save_token(std::string& token)
     {
-        _tokens[token] = time(nullptr);
+        std::lock_guard<std::mutex> lock(_tokens_mutex);
+        // sweep expired entries so the map stays bounded
+        time_t now = time(nullptr);
+        for (auto it = _tokens.begin(); it != _tokens.end();) {
+            it = (it->second + TOKEN_EXPIRATION_TIME < now) ? _tokens.erase(it) : std::next(it);
+        }
+        _tokens[token] = now;
         LOGV("save_token: %s, time: %ld", token.c_str(), _tokens[token]);
     }
 
     static bool check_token(std::string& token)
     {
-        if (_tokens.find(token) == _tokens.end()) {
+        std::lock_guard<std::mutex> lock(_tokens_mutex);
+        auto it = _tokens.find(token);
+        if (it == _tokens.end()) {
             LOGE("Not found token");
             return false;
         }
-        if (_tokens[token] + TOKEN_EXPIRATION_TIME < time(nullptr)) {
+        if (it->second + TOKEN_EXPIRATION_TIME < time(nullptr)) {
             LOGV("Expired token");
-            _tokens.erase(token);
+            _tokens.erase(it);
             return false;
         }
         LOGV("Valid token");
@@ -157,6 +168,7 @@ protected:
 
 private:
     static inline std::unordered_map<std::string, time_t> _tokens;
+    static inline std::mutex _tokens_mutex;
 
     static std::string _get_http_var(request_t req, std::string param)
     {
