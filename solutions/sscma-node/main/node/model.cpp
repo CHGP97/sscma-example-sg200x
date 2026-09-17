@@ -73,7 +73,13 @@ void ModelNode::threadEntry() {
 
         ma_tick_t start = Tick::current();
 
-        json reply       = json::object({{"type", MA_MSG_TYPE_EVT}, {"name", "invoke"}, {"code", MA_OK}, {"data", {{"count", ++count_}}}});
+        // wall-clock epoch in ms so consumers can measure end-to-end latency
+        // (Tick::current() is CLOCK_MONOTONIC and not comparable across hosts)
+        struct timespec ts_wall;
+        clock_gettime(CLOCK_REALTIME, &ts_wall);
+        int64_t timestamp_ms = static_cast<int64_t>(ts_wall.tv_sec) * 1000 + ts_wall.tv_nsec / 1000000;
+
+        json reply       = json::object({{"type", MA_MSG_TYPE_EVT}, {"name", "invoke"}, {"code", MA_OK}, {"data", {{"count", ++count_}, {"timestamp", timestamp_ms}}}});
         float scale_h    = 1.0;
         float scale_w    = 1.0;
         int32_t offset_x = 0;
@@ -559,6 +565,11 @@ ma_err_t ModelNode::onStart() {
         camera_->config(CHN_JPEG, preview_width_, preview_height_, preview_fps_, MA_PIXEL_FORMAT_JPEG);
         camera_->attach(CHN_JPEG, &jpeg_frame_);
     }
+
+    // the camera pipeline may already be running without this channel
+    // enabled (this node was added at runtime); rebuild it so the channel
+    // takes effect immediately
+    camera_->restartVideo();
 
     MA_LOGI(TAG, "start model: %s(%s)", type_.c_str(), id_.c_str());
     started_ = true;

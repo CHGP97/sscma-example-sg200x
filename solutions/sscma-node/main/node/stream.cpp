@@ -209,6 +209,11 @@ ma_err_t StreamNode::onStart() {
     camera_->attach(CHN_H264, &frame_);
     camera_->attach(CHN_AUDIO, &frame_);
 
+    // the camera pipeline may already be running without the H264 channel
+    // enabled (this node was added at runtime); rebuild it so the channel
+    // takes effect immediately instead of producing an empty RTSP stream
+    camera_->restartVideo();
+
     started_ = true;
 
     thread_->start(this);

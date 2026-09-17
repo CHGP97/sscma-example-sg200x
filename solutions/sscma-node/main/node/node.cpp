@@ -61,8 +61,15 @@ Node* NodeFactory::create(const std::string id, const std::string type, const js
         return nullptr;
     }
     n->server_ = server;
-    if (MA_OK != n->onCreate(data["config"])) {
-        return nullptr;
+    try {
+        if (MA_OK != n->onCreate(data["config"])) {
+            delete n;
+            return nullptr;
+        }
+    } catch (...) {
+        // onCreate threw: release the half-built node, propagate the error
+        delete n;
+        throw;
     }
 
     // set dependencies

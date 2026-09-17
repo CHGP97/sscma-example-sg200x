@@ -98,6 +98,12 @@ public:
     ma_err_t attach(int chn, MessageBox* msgbox);
     ma_err_t detach(int chn, MessageBox* msgbox);
 
+    // rebuild the video pipeline so channels enabled after the last
+    // startVideo() (e.g. a stream node attached at runtime) take effect;
+    // skipped automatically when no new channel appeared
+    void restartVideo();
+    bool isStarted() const { return started_; }
+
     // still-capture size chosen by the camera node's resolution option
     // (e.g. 2592x1944 in Max mode), before the model preview reconfigures
     // the JPEG channel to its preview size
@@ -131,6 +137,13 @@ protected:
     int vpssCallback(void* pData, void* pArgs);
     static int vencCallbackStub(void* pData, void* pArgs, void* pUserData);
     static int vpssCallbackStub(void* pData, void* pArgs, void* pUserData);
+
+private:
+    void setupChannels();
+
+    // bitmask of channels actually included in the RUNNING pipeline,
+    // used to skip a needless restart when nothing new was enabled
+    uint32_t pipeline_mask_ = 0;
 
 private:
     std::vector<channel> channels_;

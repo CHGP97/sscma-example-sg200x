@@ -18,6 +18,7 @@ const char* VIDEO_FORMATS[] = {"raw", "jpeg", "h264"};
         Thread::enterCritical();                                                                                                             \
         Thread::sleep(Tick::fromMilliseconds(100));                                                                                          \
         MA_LOGI(TAG, "start video");                                                                                                         \
+        setupChannels();                                                                                                                     \
         startVideo();                                                                                                                        \
         Thread::sleep(Tick::fromSeconds(1));                                                                                                 \
         Thread::exitCritical();                                                                                                              \
@@ -91,11 +92,12 @@ int CameraNode::vencCallback(void* pData, void* pArgs) {
     APP_VENC_CHN_CFG_S* pstVencChnCfg = (APP_VENC_CHN_CFG_S*)pstDataParam->pParam;
     VENC_CHN VencChn                  = pstVencChnCfg->VencChn;
 
-    if (!started_ || !enabled_ || channels_[VencChn].msgboxes.empty()) {
-        return CVI_SUCCESS;
-    }
+    // bounds check BEFORE indexing channels_
     if (pstVencChnCfg->VencChn >= CHN_MAX) {
         MA_LOGW(TAG, "invalid chn %d", pstVencChnCfg->VencChn);
+        return CVI_SUCCESS;
+    }
+    if (!started_ || !enabled_ || channels_[VencChn].msgboxes.empty()) {
         return CVI_SUCCESS;
     }
 
@@ -180,11 +182,12 @@ int CameraNode::vpssCallback(void* pData, void* pArgs) {
     VIDEO_FRAME_INFO_S* VpssFrame     = (VIDEO_FRAME_INFO_S*)pData;
     VIDEO_FRAME_S* f                  = &VpssFrame->stVFrame;
 
-    if (!started_ || !enabled_ || channels_[pstVencChnCfg->VencChn].msgboxes.empty()) {
-        return CVI_SUCCESS;
-    }
+    // bounds check BEFORE indexing channels_
     if (pstVencChnCfg->VencChn >= CHN_MAX) {
         MA_LOGW(TAG, "invalid chn %d", pstVencChnCfg->VencChn);
+        return CVI_SUCCESS;
+    }
+    if (!started_ || !enabled_ || channels_[pstVencChnCfg->VencChn].msgboxes.empty()) {
         return CVI_SUCCESS;
     }
 
@@ -270,18 +273,21 @@ void CameraNode::threadAudioEntry() {
     err = snd_pcm_hw_params_set_access(handle, params, SND_PCM_ACCESS_RW_INTERLEAVED);
     if (err < 0) {
         MA_LOGE(TAG, "Unable to set access type: %s", snd_strerror(err));
+        snd_pcm_hw_params_free(params);
         snd_pcm_close(handle);
         return;
     }
     err = snd_pcm_hw_params_set_format(handle, params, FORMAT);
     if (err < 0) {
         MA_LOGE(TAG, "Unable to set sample format: %s", snd_strerror(err));
+        snd_pcm_hw_params_free(params);
         snd_pcm_close(handle);
         return;
     }
     err = snd_pcm_hw_params_set_channels(handle, params, CHANNELS);
     if (err < 0) {
         MA_LOGE(TAG, "Unable to set channel count: %s", snd_strerror(err));
+        snd_pcm_hw_params_free(params);
         snd_pcm_close(handle);
         return;
     }
@@ -289,6 +295,7 @@ void CameraNode::threadAudioEntry() {
     err = snd_pcm_hw_params_set_rate_near(handle, params, &rate, 0);
     if (err < 0) {
         MA_LOGE(TAG, "Unable to set sample rate: %s", snd_strerror(err));
+        snd_pcm_hw_params_free(params);
         snd_pcm_close(handle);
         return;
     }
@@ -296,6 +303,7 @@ void CameraNode::threadAudioEntry() {
     err = snd_pcm_hw_params_get_buffer_time_max(params, &buffer_time, 0);
     if (err < 0) {
         MA_LOGE(TAG, "Unable to get buffer time: %s", snd_strerror(err));
+        snd_pcm_hw_params_free(params);
         snd_pcm_close(handle);
         return;
     }
@@ -306,12 +314,14 @@ void CameraNode::threadAudioEntry() {
     err         = snd_pcm_hw_params_set_period_time_near(handle, params, &period_time, 0);
     if (err < 0) {
         MA_LOGE(TAG, "Unable to set period time: %s", snd_strerror(err));
+        snd_pcm_hw_params_free(params);
         snd_pcm_close(handle);
         return;
     }
     err = snd_pcm_hw_params_set_buffer_time_near(handle, params, &buffer_time, 0);
     if (err < 0) {
         MA_LOGE(TAG, "Unable to set buffer time: %s", snd_strerror(err));
+        snd_pcm_hw_params_free(params);
         snd_pcm_close(handle);
         return;
     }
@@ -319,6 +329,7 @@ void CameraNode::threadAudioEntry() {
     err = snd_pcm_hw_params(handle, params);
     if (err < 0) {
         MA_LOGE(TAG, "Unable to set parameters: %s", snd_strerror(err));
+        snd_pcm_hw_params_free(params);
         snd_pcm_close(handle);
         return;
     }
@@ -328,6 +339,7 @@ void CameraNode::threadAudioEntry() {
 
     if (buffer_size < chunk_size) {
         MA_LOGE(TAG, "Cannot allocate buffer of size %d", buffer_size);
+        snd_pcm_hw_params_free(params);
         snd_pcm_close(handle);
         return;
     }
@@ -364,6 +376,7 @@ void CameraNode::threadAudioEntry() {
         }
     }
 
+    snd_pcm_hw_params_free(params);
     snd_pcm_close(handle);
     delete[] buffer;
 }
@@ -587,6 +600,12 @@ ma_err_t CameraNode::onCreate(const json& config) {
         thread_audio_                   = new Thread((type_ + "#" + id_ + "#audio").c_str(), &CameraNode::threadAudioEntryStub, this);
         if (thread_audio_ == nullptr) {
             delete thread_;
+            thread_ = nullptr;
+            if (transport_ != nullptr) {
+                transport_->deInit();
+                delete transport_;
+                transport_ = nullptr;
+            }
             MA_THROW(Exception(MA_ENOMEM, "Not enough memory"));
         }
     }
@@ -662,6 +681,84 @@ ma_err_t CameraNode::onDestroy() {
     created_ = false;
 
     return MA_OK;
+}
+
+void CameraNode::setupChannels() {
+    pipeline_mask_ = 0;
+    for (int i = 0; i < CHN_MAX; i++) {
+        if (i == CHN_AUDIO) {
+            continue;
+        }
+        video_ch_param_t param;
+        switch (channels_[i].format) {
+            case MA_PIXEL_FORMAT_JPEG:
+                param.format = VIDEO_FORMAT_JPEG;
+                break;
+            case MA_PIXEL_FORMAT_H264:
+                param.format = VIDEO_FORMAT_H264;
+                break;
+            case MA_PIXEL_FORMAT_H265:
+                param.format = VIDEO_FORMAT_H265;
+                break;
+            case MA_PIXEL_FORMAT_RGB888:
+                param.format = VIDEO_FORMAT_RGB888;
+                break;
+            case MA_PIXEL_FORMAT_YUV422:
+                param.format = VIDEO_FORMAT_NV21;
+                break;
+            default:
+                continue;
+        }
+        param.width  = channels_[i].width;
+        param.height = channels_[i].height;
+        param.fps    = channels_[i].fps;
+        if (!channels_[i].enabled) {
+            continue;
+        }
+        MA_LOGI(TAG, "setup channel %d format %d width %d height %d fps %d", i, param.format, param.width, param.height, param.fps);
+        if (setupVideo(static_cast<video_ch_index_t>(i), &param) != 0) {
+            MA_LOGE(TAG, "setup channel %d failed, skipped", i);
+            continue;
+        }
+        pipeline_mask_ |= (1u << i);
+        if (i == CHN_RAW) {
+            registerVideoFrameHandler(static_cast<video_ch_index_t>(i), 0, vpssCallbackStub, this);
+        } else {
+            registerVideoFrameHandler(static_cast<video_ch_index_t>(i), 0, vencCallbackStub, this);
+        }
+    }
+}
+
+void CameraNode::restartVideo() {
+    Guard guard(mutex_);
+
+    if (!started_) {
+        // not running: onStart()/CAMERA_INIT will pick the channel set up
+        return;
+    }
+
+    uint32_t enabled_mask = 0;
+    for (int i = 0; i < CHN_MAX; i++) {
+        if (i != CHN_AUDIO && channels_[i].enabled && channels_[i].configured) {
+            enabled_mask |= (1u << i);
+        }
+    }
+
+    if ((enabled_mask & ~pipeline_mask_) == 0) {
+        // no newly enabled channel: the running pipeline already covers it
+        MA_LOGD(TAG, "restart video skipped, no new channel (mask %#x)", enabled_mask);
+        return;
+    }
+
+    Thread::enterCritical();
+    MA_LOGI(TAG, "restart video (channel set changed: %#x -> %#x)", pipeline_mask_, enabled_mask);
+    Thread::sleep(Tick::fromMilliseconds(100));
+    deinitVideo();
+    Thread::sleep(Tick::fromSeconds(1));
+    setupChannels();
+    startVideo();
+    Thread::sleep(Tick::fromSeconds(1));
+    Thread::exitCritical();
 }
 
 ma_err_t CameraNode::onStart() {
